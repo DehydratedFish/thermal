@@ -480,7 +480,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
         floorf(region.y + (padding.y * 0.5f))
     };
 
-    u32 fg = PACK_RGBA(255, 255, 255, 255);
+    u32 fg = buffer->fg_color;
     u32 bg = 0;
 
     s32 pos = buffer->ring.pos;

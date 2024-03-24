@@ -947,10 +947,6 @@ PlatformExecutionContext platform_execute(String command) {
     assert(CreatePipe(&read_pipe, &write_pipe, &attributes, 0));
     assert(SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0));
 
-    if (!(SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), ENABLE_PROCESSED_OUTPUT))) {
-        print("%d\n", GetLastError());
-    }
-
     PROCESS_INFORMATION process = {};
     STARTUPINFO info = {};
     info.cb         = sizeof(info);

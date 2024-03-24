@@ -9,6 +9,75 @@
     
 
 
+INTERNAL s32 escape_number(String *str) {
+    String num = {};
+    num.data = str->data;
+
+    for (s64 i = 0; i < str->size; i += 1) {
+        if (str->data[i] >= '0' && str->data[i] <= '9') {
+            num.size += 1;
+        } else {
+            break;
+        }
+    }
+
+    *str = shrink_front(*str, num.size);
+    s64 result = convert_string_to_s64(num.data, num.size);
+
+    return result;
+}
+
+u32 const ESC_SEQUENCE_NONE     = 0x00;
+u32 const ESC_SEQUENCE_FG_COLOR = 0x01;
+u32 const ESC_SEQUENCE_BG_COLOR = 0x02;
+struct EscapeSequence {
+    u32 kind;
+    s32 args[16];
+    s32 length;
+};
+
+INTERNAL EscapeSequence parse_escape_sequence(String str) {
+    EscapeSequence seq = {};
+
+    if (str.size < 2) {
+        return seq;
+    }
+
+    if (str.data[0] != 0x1B) return seq;
+    if (str.data[1] != '[')  return seq;
+
+    String start = str;
+
+    str = shrink_front(str, 2);
+    s32 kind = escape_number(&str);
+
+    if (kind == 38) {
+        seq.kind = ESC_SEQUENCE_FG_COLOR;
+    } else if (kind == 48) {
+        seq.kind = ESC_SEQUENCE_BG_COLOR;
+    } else {
+        return seq;
+    }
+
+    s32 counter = 0;
+    while (str.size && str.data[0] == ';') {
+        str = shrink_front(str);
+
+        s32 value = escape_number(&str);
+        if (counter < 16) {
+            seq.args[counter] = value;
+        }
+
+        counter += 1;
+    }
+
+    if (str.size && str.data[0] != 'm') return {};
+
+    seq.length = (str.data + 1) - start.data;
+
+    return seq;
+}
+
 s32 const DefaultConsoleBufferSize = KILOBYTES(4);
 
 
@@ -111,8 +180,35 @@ void update_display_buffer(ConsoleBuffer *buffer) {
 }
 
 INTERNAL void append(ConsoleBuffer *buffer, String str) {
-    s32 written = platform_write(&buffer->ring, str.data, str.size);
-    if (written < str.size) {
+    String writable = str;
+    writable.size = 0;
+
+    while (str.size) {
+        EscapeSequence seq = parse_escape_sequence(str);
+        if (seq.kind != 0) {
+            s32 written = platform_write(&buffer->ring, writable.data, writable.size);
+            if (written < writable.size) {
+                // TODO: This is just a hack to prevent generating invalid utf8 sequences.
+                u8 *first_byte = (u8*)buffer->ring.memory + buffer->ring.alloc + buffer->ring.pos - buffer->ring.size;
+                while ((*first_byte & 0xC0) == 0x80) buffer->ring.size -= 1;
+            }
+
+            str = shrink_front(str, seq.length);
+            writable = str;
+            writable.size = 0;
+
+            if (seq.kind == ESC_SEQUENCE_FG_COLOR) {
+                buffer->current_fg = PACK_RGB(seq.args[1], seq.args[2], seq.args[3]);
+            } else if (seq.kind == ESC_SEQUENCE_BG_COLOR) {
+                buffer->current_bg = PACK_RGB(seq.args[1], seq.args[2], seq.args[3]);
+            }
+        } else {
+            str = shrink_front(str, 1);
+            writable.size += 1;
+        }
+    }
+    s32 written = platform_write(&buffer->ring, writable.data, writable.size);
+    if (written < writable.size) {
         // TODO: This is just a hack to prevent generating invalid utf8 sequences.
         u8 *first_byte = (u8*)buffer->ring.memory + buffer->ring.alloc + buffer->ring.pos - buffer->ring.size;
         while ((*first_byte & 0xC0) == 0x80) buffer->ring.size -= 1;
@@ -159,73 +255,7 @@ INTERNAL void backslash_to_slash(String str) {
 }
 
 
-INTERNAL s32 escape_number(String *str) {
-    String num = {};
-    num.data = str->data;
-
-    for (s64 i = 0; i < str->size; i += 1) {
-        if (str->data[i] >= '0' && str->data[i] <= '9') {
-            num.size += 1;
-        } else {
-            break;
-        }
-    }
-
-    s64 result = convert_string_to_s64(num.data, num.size);
-
-    return result;
-}
-
-u32 const ESC_SEQUENCE_FG_COLOR = 0x01;
-u32 const ESC_SEQUENCE_BG_COLOR = 0x02;
-struct EscapeSequence {
-    u32 kind;
-    s32 args[16];
-    s32 length;
-};
-
-INTERNAL EscapeSequence parse_escape_sequence(String str) {
-    EscapeSequence seq = {};
-
-    if (str.size < 2) {
-        return seq;
-    }
-
-    if (str.data[0] != 0x1B) return seq;
-    if (str.data[1] != '[')  return seq;
-
-    String start = str;
-
-    str = shrink_front(str);
-    s32 kind = escape_number(&str);
-
-    if (kind == 38) {
-        seq.kind = ESC_SEQUENCE_FG_COLOR;
-    } else if (kind == 48) {
-        seq.kind = ESC_SEQUENCE_BG_COLOR;
-    } else {
-        return seq;
-    }
-
-    s32 counter = 0;
-    while (str.size && str.data[0] == ';') {
-        str = shrink_front(str);
-
-        s32 value = escape_number(&str);
-        if (counter < 16) {
-            seq.args[counter] = value;
-        }
-
-        counter += 1;
-    }
-
-    if (str.data[0] != 'm') return {};
-
-    return seq;
-}
-
 s32 application_main(Array<String> args) {
-    // NOTE: This is temporary memory.
     String starting_dir = platform_get_current_directory();
 
     ApplicationState state = {};
@@ -254,11 +284,23 @@ s32 application_main(Array<String> args) {
     ui.font_texture = &font_texture;
 
     ConsoleBuffer buffer = {};
-    buffer.ring      = platform_create_ring_buffer(DefaultConsoleBufferSize);
-    buffer.line_wrap = true;
-    buffer.prompt.format = "%d > ";
+    buffer.ring = platform_create_ring_buffer(DefaultConsoleBufferSize);
+    assert(buffer.ring.alloc % sizeof(ConsoleTile) == 0);
 
+    buffer.fg_color  = PACK_RGB(210, 210, 210);
+    buffer.bg_color  = 0;
+
+    buffer.current_fg = buffer.fg_color;
+    buffer.current_bg = buffer.bg_color;
+
+    buffer.line_wrap = true;
+    buffer.pipe_buffer = ALLOCATE_ARRAY(u8, MEGABYTES(1));
+
+    buffer.conversion_buffer = ALLOCATE_ARRAY(ConsoleTile, 1024);
+
+    buffer.prompt.format = "%d > ";
     generate_prompt(&buffer.prompt, &state);
+
 
     while (state.running) {
         platform_update(&state);
@@ -316,6 +358,8 @@ s32 application_main(Array<String> args) {
                     } else {
                         change_path(&state.current_dir, command);
                     }
+                } else if (command == "color") {
+                    append(&buffer, "\x1b[38;2;255;0;255m");
                 } else {
                     buffer.pec = platform_execute(command);
 
@@ -334,19 +378,13 @@ s32 application_main(Array<String> args) {
         }
 
         if (buffer.pec.started_successfully) {
-            // TODO: preallocate a good sized buffer
-            s32 const bufsize = MEGABYTES(16);
-            u8 *tmp = ALLOC(default_allocator(), u8, bufsize);
-
             u32 pending = platform_input_available(&buffer.pec);
             while (pending) {
-                s32 read = platform_read(&buffer.pec, tmp, bufsize);
-                append(&buffer, {tmp, read});
+                s32 read = platform_read(&buffer.pec, buffer.pipe_buffer.memory, buffer.pipe_buffer.size);
+                append(&buffer, {buffer.pipe_buffer.memory, read});
 
                 pending = platform_input_available(&buffer.pec);
             }
-
-            DEALLOC(default_allocator(), tmp, bufsize);
         }
 
         if (font.is_dirty) {

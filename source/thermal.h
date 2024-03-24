@@ -76,6 +76,7 @@ struct LineInfo {
 
 struct ConsoleTile {
     u32 cp;
+    u32 flags;
     u32 fg;
     u32 bg;
 };
@@ -92,6 +93,16 @@ struct ConsoleBuffer {
     Array<String32> history;
     
     PromptBuffer prompt;
+
+    Array<u8> pipe_buffer;
+
+    Array<ConsoleTile> conversion_buffer;
+
+    u32 fg_color;
+    u32 bg_color;
+
+    u32 current_fg;
+    u32 current_bg;
 
     s32 display_start;
 
