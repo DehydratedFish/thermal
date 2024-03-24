@@ -69,16 +69,15 @@ struct PromptBuffer {
     String format;
 };
 
-struct LineInfo {
-    String line;
-    s32 code_points;
-};
-
 struct ConsoleTile {
     u32 cp;
     u32 flags;
     u32 fg;
     u32 bg;
+};
+
+struct LineInfo {
+    Array<ConsoleTile> line;
 };
 
 struct ConsoleBuffer {

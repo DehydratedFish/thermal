@@ -81,57 +81,60 @@ INTERNAL EscapeSequence parse_escape_sequence(String str) {
 s32 const DefaultConsoleBufferSize = KILOBYTES(4);
 
 
-INTERNAL String console_buffer_content(ConsoleBuffer *buffer) {
+INTERNAL Array<ConsoleTile> console_buffer_content(ConsoleBuffer *buffer) {
     u8 *ptr = (u8*)buffer->ring.memory + buffer->ring.alloc + buffer->ring.pos;
 
-    String result = {};
-    result.data = ptr - buffer->ring.size;
-    result.size = buffer->ring.size;
+    Array<ConsoleTile> result = {};
+    result.memory = (ConsoleTile*)(ptr - buffer->ring.size);
+    result.size   = buffer->ring.size / sizeof(ConsoleTile);
 
     return result;
 }
 
-INTERNAL b32 eat_new_line(UTF8Iterator *it) {
-    if (it->cp == '\n') {
-        next(it);
-        if (it->cp == '\r') next(it);
+INTERNAL b32 eat_new_line(Array<ConsoleTile> content, s64 *index) {
+    s64 i = *index;
+    b32 result = false;
 
-        return true;
-    } else if (it->cp == '\r') {
-        next(it);
-        if (it->cp == '\n') next(it);
+    if (content[i].cp == '\n') {
+        i += 1;
+        if (i < content.size && content[i].cp == '\r') i += 1;
 
-        return true;
+        result = true;
+    } else if (content[i].cp == '\r') {
+        i += 1;
+        if (i < content.size && content[i].cp == '\n') i += 1;
+
+        result = true;
     }
 
-    return false;
+    *index = i;
+
+    return result;
 }
 
 void update_lines(ConsoleBuffer *buffer) {
     buffer->lines.size = 0;
 
-    String content = console_buffer_content(buffer);
+    Array<ConsoleTile> content = console_buffer_content(buffer);
     if (content.size == 0) return;
 
-    LineInfo info = {};
-    info.line.data = content.data;
-    info.line.size = 0;
-    info.code_points = 0;
+    LineInfo info = {content.memory, 0};
 
     LineInfo *current_line = append(buffer->lines, info);
 
-    UTF8Iterator it = make_utf8_it(content);
-    while (it.valid) {
-        if (eat_new_line(&it) || (buffer->line_wrap && current_line->code_points == buffer->tile_count.x)) {
-            info.line.data = content.data + it.index;
+    for (s64 i = 0; i < content.size; i += 1) {
+        if (eat_new_line(content, &i) ) {
+            info.line.memory = content.memory + i;
             info.line.size = 0;
-            info.code_points = 0;
+            current_line = append(buffer->lines, info);
+
+            i -= 1;
+        } else if (buffer->line_wrap && current_line->line.size == buffer->tile_count.x) {
+            info.line.memory = content.memory + i;
+            info.line.size = 1;
             current_line = append(buffer->lines, info);
         } else {
-            current_line->line.size += it.utf8_size;
-            current_line->code_points += 1;
-
-            next(&it);
+            current_line->line.size += 1;
         }
     }
 }
@@ -165,37 +168,33 @@ void update_display_buffer(ConsoleBuffer *buffer) {
 
     Array<LineInfo> lines = visible_lines(buffer);
     
-    V2i tile = {};
+    s32 line = 0;
     FOR (lines, info) {
-        for (UTF8Iterator it = make_utf8_it(info->line); it.valid; next(&it)) {
-            buffer->display_buffer[(tile.y * buffer->tile_count.x) + tile.x].cp = it.cp;
-            // TODO: Color.
-            
-            tile.x += 1;
-            if (tile.x == buffer->tile_count.x) break;
-        }
-        tile.y += 1;
-        tile.x  = 0;
+        s64 size = info->line.size;
+        if (size > buffer->tile_count.x) size = buffer->tile_count.x;
+
+        copy_memory(&buffer->display_buffer[line * buffer->tile_count.x], info->line.memory, size * sizeof(ConsoleTile));
+        line += 1;
     }
 }
 
+
+INTERNAL void flush_conversion_buffer(ConsoleBuffer *buffer, s32 count) {
+    s64 size = count * sizeof(*buffer->conversion_buffer.memory);
+    s32 written = platform_write(&buffer->ring, buffer->conversion_buffer.memory, size);
+    assert(written == size);
+}
+
 INTERNAL void append(ConsoleBuffer *buffer, String str) {
-    String writable = str;
-    writable.size = 0;
+    s32 conversion_count = 0;
 
     while (str.size) {
         EscapeSequence seq = parse_escape_sequence(str);
         if (seq.kind != 0) {
-            s32 written = platform_write(&buffer->ring, writable.data, writable.size);
-            if (written < writable.size) {
-                // TODO: This is just a hack to prevent generating invalid utf8 sequences.
-                u8 *first_byte = (u8*)buffer->ring.memory + buffer->ring.alloc + buffer->ring.pos - buffer->ring.size;
-                while ((*first_byte & 0xC0) == 0x80) buffer->ring.size -= 1;
-            }
+            flush_conversion_buffer(buffer, conversion_count);
 
             str = shrink_front(str, seq.length);
-            writable = str;
-            writable.size = 0;
+            conversion_count = 0;
 
             if (seq.kind == ESC_SEQUENCE_FG_COLOR) {
                 buffer->current_fg = PACK_RGB(seq.args[1], seq.args[2], seq.args[3]);
@@ -203,16 +202,24 @@ INTERNAL void append(ConsoleBuffer *buffer, String str) {
                 buffer->current_bg = PACK_RGB(seq.args[1], seq.args[2], seq.args[3]);
             }
         } else {
-            str = shrink_front(str, 1);
-            writable.size += 1;
+            UTF8CharResult c = utf8_peek(str);
+            assert(c.status == 0);
+
+            buffer->conversion_buffer[conversion_count].cp = c.cp;
+            buffer->conversion_buffer[conversion_count].fg = buffer->current_fg;
+            buffer->conversion_buffer[conversion_count].bg = buffer->current_bg;
+
+            conversion_count += 1;
+
+            if (conversion_count == buffer->conversion_buffer.size) {
+                flush_conversion_buffer(buffer, conversion_count);
+                conversion_count = 0;
+            }
+
+            str = shrink_front(str, c.length);
         }
     }
-    s32 written = platform_write(&buffer->ring, writable.data, writable.size);
-    if (written < writable.size) {
-        // TODO: This is just a hack to prevent generating invalid utf8 sequences.
-        u8 *first_byte = (u8*)buffer->ring.memory + buffer->ring.alloc + buffer->ring.pos - buffer->ring.size;
-        while ((*first_byte & 0xC0) == 0x80) buffer->ring.size -= 1;
-    }
+    flush_conversion_buffer(buffer, conversion_count);
 
     update_lines(buffer);
     update_display_buffer(buffer);
@@ -297,6 +304,7 @@ s32 application_main(Array<String> args) {
     buffer.pipe_buffer = ALLOCATE_ARRAY(u8, MEGABYTES(1));
 
     buffer.conversion_buffer = ALLOCATE_ARRAY(ConsoleTile, 1024);
+    assert((sizeof(*buffer.conversion_buffer.memory) * buffer.conversion_buffer.size) < buffer.ring.alloc);
 
     buffer.prompt.format = "%d > ";
     generate_prompt(&buffer.prompt, &state);
@@ -318,6 +326,9 @@ s32 application_main(Array<String> args) {
 
         b32 command_run = console_buffer_view(&ui, &buffer, &buffer);
         if (command_run) {
+            buffer.current_fg = buffer.fg_color;
+            buffer.current_bg = buffer.bg_color;
+
             String32 utf32_command = {buffer.command.memory, buffer.command.size};
 
             if (utf32_command.size) {
@@ -359,7 +370,7 @@ s32 application_main(Array<String> args) {
                         change_path(&state.current_dir, command);
                     }
                 } else if (command == "color") {
-                    append(&buffer, "\x1b[38;2;255;0;255m");
+                    append(&buffer, "\x1b[38;2;255;0;255mThis is a test string that should look purple.");
                 } else {
                     buffer.pec = platform_execute(command);
 

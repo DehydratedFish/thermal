@@ -496,7 +496,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     V2i current_tile = {};
     FOR (buffer->display_buffer, tile) {
         if (tile->cp != 0) {
-            draw_character(ui, offset, current_tile, tile->cp, fg, bg);
+            draw_character(ui, offset, current_tile, tile->cp, tile->fg, tile->bg);
         }
 
         current_tile.x += 1;
