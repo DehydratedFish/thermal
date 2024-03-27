@@ -519,10 +519,9 @@ void platform_delete_file_or_directory(String path) {
     SHFileOperationW(&op);
 }
 
-String read_entire_file(String file, u32 *status) {
-    s64 mark = temporary_storage_mark();
-    DEFER(temporary_storage_rewind(mark));
-
+String read_entire_file(String file, u32 *status, Allocator alloc) {
+    RESET_TEMP_STORAGE_ON_EXIT();
+    
     String16 wide_file = to_utf16(temporary_allocator(), file, true);
 
     HANDLE handle = CreateFileW((wchar_t*)wide_file.data, GENERIC_READ, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
@@ -539,7 +538,7 @@ String read_entire_file(String file, u32 *status) {
     String result = {};
 
     if (size.QuadPart) {
-        result = allocate_string(size.QuadPart);
+        result = allocate_string(size.QuadPart, alloc);
 
         s64 total = 0;
         while (total != result.size) {
@@ -548,7 +547,7 @@ String read_entire_file(String file, u32 *status) {
             if (!ReadFile(handle, result.data + total, size.QuadPart, &bytes_read, 0)) {
                 if (status) *status = READ_ENTIRE_FILE_READ_ERROR;
 
-                destroy_string(&result);
+                destroy_string(&result, alloc);
                 return {};
             }
 
@@ -1010,6 +1009,7 @@ s32 platform_read(PlatformExecutionContext *pec, void *buffer, s32 size) {
 
     return bytes_read;
 }
+
 
 
 INTERNAL V2  CurrentMousePosition;

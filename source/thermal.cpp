@@ -27,12 +27,17 @@ INTERNAL s32 escape_number(String *str) {
     return result;
 }
 
-u32 const ESC_SEQUENCE_NONE     = 0x00;
-u32 const ESC_SEQUENCE_FG_COLOR = 0x01;
-u32 const ESC_SEQUENCE_BG_COLOR = 0x02;
+enum {
+    ESC_SEQUENCE_NONE,
+
+    ESC_SEQUENCE_GRAPHICS,
+
+    ESC_SEQUENCE_ERASE,
+};
 struct EscapeSequence {
     u32 kind;
     s32 args[16];
+    s32 arg_count;
     s32 length;
 };
 
@@ -49,17 +54,18 @@ INTERNAL EscapeSequence parse_escape_sequence(String str) {
     String start = str;
 
     str = shrink_front(str, 2);
-    s32 kind = escape_number(&str);
 
-    if (kind == 38) {
-        seq.kind = ESC_SEQUENCE_FG_COLOR;
-    } else if (kind == 48) {
-        seq.kind = ESC_SEQUENCE_BG_COLOR;
-    } else {
+    if (str.size && str[0] == 'K') {
+        seq.kind   = ESC_SEQUENCE_ERASE;
+        seq.length = 3;
+
         return seq;
     }
 
-    s32 counter = 0;
+    seq.args[0] = escape_number(&str);
+    seq.kind = ESC_SEQUENCE_GRAPHICS;
+
+    s32 counter = 1;
     while (str.size && str.data[0] == ';') {
         str = shrink_front(str);
 
@@ -70,6 +76,7 @@ INTERNAL EscapeSequence parse_escape_sequence(String str) {
 
         counter += 1;
     }
+    seq.arg_count = counter;
 
     if (str.size && str.data[0] != 'm') return {};
 
@@ -185,8 +192,12 @@ INTERNAL void flush_conversion_buffer(ConsoleBuffer *buffer, s32 count) {
     assert(written == size);
 }
 
+u32 const DefaultTileFlags = 0;
+
 INTERNAL void append(ConsoleBuffer *buffer, String str) {
     s32 conversion_count = 0;
+
+    // TODO: SIMD scan over the buffer.
 
     while (str.size) {
         EscapeSequence seq = parse_escape_sequence(str);
@@ -196,10 +207,26 @@ INTERNAL void append(ConsoleBuffer *buffer, String str) {
             str = shrink_front(str, seq.length);
             conversion_count = 0;
 
-            if (seq.kind == ESC_SEQUENCE_FG_COLOR) {
-                buffer->current_fg = PACK_RGB(seq.args[1], seq.args[2], seq.args[3]);
-            } else if (seq.kind == ESC_SEQUENCE_BG_COLOR) {
-                buffer->current_bg = PACK_RGB(seq.args[1], seq.args[2], seq.args[3]);
+            if (seq.kind == ESC_SEQUENCE_GRAPHICS) {
+                for (s32 i = 0; i < seq.arg_count; i += 1) {
+                    if (seq.args[i] == 38 && seq.args[i + 1] == 2) {
+                        buffer->current_fg = PACK_RGB(seq.args[i + 2], seq.args[i + 3], seq.args[i + 4]);
+                        i += 4;
+                    } else if (seq.args[i] == 48 && seq.args[i + 1] == 2) {
+                        buffer->current_bg = PACK_RGB(seq.args[i + 2], seq.args[i + 3], seq.args[i + 4]);
+                        i += 4;
+                    } else if (seq.args[i] == 1) {
+                        buffer->current_tile_flags |= CONSOLE_TILE_FLAG_BOLD;
+                    } else if (seq.args[i] == 31) {
+                        buffer->current_fg = PACK_RGB(255, 0, 0);
+                    } else if (seq.args[i] == 0) {
+                        buffer->current_fg = buffer->fg_color;
+                        buffer->current_bg = buffer->bg_color;
+                        buffer->current_tile_flags = DefaultTileFlags;
+                    }
+                }
+            } else if (seq.kind == ESC_SEQUENCE_ERASE) {
+                // TODO: erase to end of line, start of line and whole line
             }
         } else {
             UTF8CharResult c = utf8_peek(str);
@@ -208,6 +235,16 @@ INTERNAL void append(ConsoleBuffer *buffer, String str) {
             buffer->conversion_buffer[conversion_count].cp = c.cp;
             buffer->conversion_buffer[conversion_count].fg = buffer->current_fg;
             buffer->conversion_buffer[conversion_count].bg = buffer->current_bg;
+
+            u32 style = CONSOLE_FONT_REGULAR;
+            if ((buffer->current_tile_flags & CONSOLE_TILE_FLAGS_BOLD_ITALIC) == CONSOLE_TILE_FLAGS_BOLD_ITALIC) {
+                style = CONSOLE_FONT_BOLD_ITALIC;
+            } else if (buffer->current_tile_flags & CONSOLE_TILE_FLAG_BOLD) {
+                style = CONSOLE_FONT_BOLD;
+            } else if (buffer->current_tile_flags & CONSOLE_TILE_FLAG_ITALIC) {
+                style = CONSOLE_FONT_ITALIC;
+            }
+            buffer->conversion_buffer[conversion_count].style = style;
 
             conversion_count += 1;
 
@@ -267,11 +304,17 @@ s32 application_main(Array<String> args) {
 
     ApplicationState state = {};
     change_path(&state.current_dir, starting_dir);
-    state.running = true;
+    state.data_dir = format("%S/data", platform_get_executable_path());
+    state.running  = true;
 
     log_to_file(Console.out);
 
     platform_setup_window();
+    ConsoleFont c_font = {};
+    init(&c_font, 20.0f, t_format("%S/fonts", state.data_dir), "LiterationMono");
+
+
+
     Renderer renderer = {};
     init_renderer(&renderer);
     set_background(&renderer, {0.1f, 0.1f, 0.1f, 1.0f});
@@ -294,6 +337,8 @@ s32 application_main(Array<String> args) {
     buffer.ring = platform_create_ring_buffer(DefaultConsoleBufferSize);
     assert(buffer.ring.alloc % sizeof(ConsoleTile) == 0);
 
+    buffer.font = &c_font;
+
     buffer.fg_color  = PACK_RGB(210, 210, 210);
     buffer.bg_color  = 0;
 
@@ -301,7 +346,7 @@ s32 application_main(Array<String> args) {
     buffer.current_bg = buffer.bg_color;
 
     buffer.line_wrap = true;
-    buffer.pipe_buffer = ALLOCATE_ARRAY(u8, MEGABYTES(1));
+    buffer.pipe_buffer = ALLOCATE_ARRAY(u8, MEGABYTES(16));
 
     buffer.conversion_buffer = ALLOCATE_ARRAY(ConsoleTile, 1024);
     assert((sizeof(*buffer.conversion_buffer.memory) * buffer.conversion_buffer.size) < buffer.ring.alloc);
@@ -328,6 +373,7 @@ s32 application_main(Array<String> args) {
         if (command_run) {
             buffer.current_fg = buffer.fg_color;
             buffer.current_bg = buffer.bg_color;
+            buffer.current_tile_flags = 0;
 
             String32 utf32_command = {buffer.command.memory, buffer.command.size};
 
@@ -369,8 +415,8 @@ s32 application_main(Array<String> args) {
                     } else {
                         change_path(&state.current_dir, command);
                     }
-                } else if (command == "color") {
-                    append(&buffer, "\x1b[38;2;255;0;255mThis is a test string that should look purple.");
+                } else if (command == "ansi_test") {
+                    append(&buffer, "\x1b[38;2;255;0;255mThis is a test string that should look purple. \x1b[0m\x1b[1mAnd this text is bold.\n");
                 } else {
                     buffer.pec = platform_execute(command);
 
@@ -398,10 +444,10 @@ s32 application_main(Array<String> args) {
             }
         }
 
-        if (font.is_dirty) {
-            update_gpu_texture(&font_texture, font.atlas);
+        if (c_font.is_dirty) {
+            update_gpu_texture(&font_texture, c_font.atlas);
 
-            font.is_dirty = false;
+            c_font.is_dirty = false;
         }
 
         draw_ui(&renderer, &ui);

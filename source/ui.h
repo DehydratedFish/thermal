@@ -101,7 +101,8 @@ struct UIState {
     r32 margin;
 
     UserInput input;
-    struct Font *font;
+    // Currently testing ConsoleFont.
+    //struct Font *font;
     GPUTexture *font_texture;
 
     DArray<UIWindow> windows;

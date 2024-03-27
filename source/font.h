@@ -24,6 +24,7 @@ struct GlyphInfo {
 
 // TODO: use the maximum texture size of the GPU
 #define FONT_ATLAS_DIMENSION 2048
+r32 const FONT_ATLAS_RATIO = 1.0f / FONT_ATLAS_DIMENSION;
 struct Font {
     String data;
     stbtt_fontinfo stb_info;
@@ -52,4 +53,55 @@ void destroy(Font *font);
 
 r32 text_width(Font *font, String text);
 V2 font_text_metrics(Font *font, String text);
+
+
+
+
+enum ConsoleFontKind {
+    CONSOLE_FONT_REGULAR,
+    CONSOLE_FONT_BOLD,
+    CONSOLE_FONT_LIGHT,
+    CONSOLE_FONT_ITALIC,
+    CONSOLE_FONT_BOLD_ITALIC,
+
+    CONSOLE_FONT_KIND_COUNT,
+};
+
+struct STBFont {
+    String data;
+    stbtt_fontinfo info;
+
+    r32 scale;
+
+    r32 ascent;
+    r32 descent;
+};
+
+struct ConsoleGlyphInfo {
+    V2i offset_in_atlas[CONSOLE_FONT_KIND_COUNT];
+    b32 loaded[CONSOLE_FONT_KIND_COUNT];
+};
+
+struct ConsoleFont {
+    Allocator allocator;
+
+    STBFont font_data[CONSOLE_FONT_KIND_COUNT];
+
+    s32 glyph_width;
+    s32 glyph_height;
+
+    b32 is_dirty;
+
+    s32 glyphs_per_line;
+    s32 max_glyphs;
+
+    V2i next_free_glyph;
+
+    String atlas;
+    HashTable<u32, ConsoleGlyphInfo, u32, glyph_hash> glyph_table;
+};
+
+void init(ConsoleFont *font, r32 height, String font_dir, String font_family, Allocator alloc = default_allocator());
+
+ConsoleGlyphInfo *get_glyph(ConsoleFont *font, u32 kind, u32 cp);
 

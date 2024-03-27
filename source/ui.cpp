@@ -181,8 +181,6 @@ INTERNAL UIRect next_widget_region(UIWindow *window, V2 default_size) {
 
 
 void init_ui(UIState *ui, Font *font) {
-    ui->font = font;
-
     ui->default_window.ui = ui;
     ui->current_window    = &ui->default_window;
 
@@ -259,6 +257,7 @@ void column_width(UIState *ui, r32 width) {
     }
 }
 
+/*
 void draw_text(UIState *ui, UIRect region, Color color, String text, u32 align) {
     new_task(ui, UI_TASK_REGULAR, ui->font_texture);
 
@@ -397,9 +396,11 @@ b32 expandable_window_seperator(UIState *ui, void *id, String label) {
 
     return widget_data->active;
 }
+*/
 
 
 
+/*
 INTERNAL void draw_character(UIState *ui, V2 offset, V2i tile, u32 cp, u32 fg, u32 bg) {
     GlyphInfo *glyph = get_glyph(ui->font, cp);
 
@@ -415,6 +416,29 @@ INTERNAL void draw_character(UIState *ui, V2 offset, V2i tile, u32 cp, u32 fg, u
     add_text_vertex(ui, {{x0, y1}, {glyph->u0, glyph->v1}, fg, bg});
     add_text_vertex(ui, {{x1, y0}, {glyph->u1, glyph->v0}, fg, bg});
     add_text_vertex(ui, {{x1, y1}, {glyph->u1, glyph->v1}, fg, bg});
+}
+*/
+
+INTERNAL void draw_character(UIState *ui, ConsoleFont *font, V2 offset, V2i tile, u32 cp, u32 kind, u32 fg, u32 bg) {
+    ConsoleGlyphInfo *glyph = get_glyph(font, kind, cp);
+
+    r32 x0 = offset.x + tile.x * font->glyph_width;
+    r32 y0 = offset.y + tile.y * font->glyph_height;
+    r32 x1 = x0 + font->glyph_width;
+    r32 y1 = y0 + font->glyph_height;
+
+    r32 u0 = glyph->offset_in_atlas[kind].x * FONT_ATLAS_RATIO;
+    r32 v0 = glyph->offset_in_atlas[kind].y * FONT_ATLAS_RATIO;
+    r32 u1 = (glyph->offset_in_atlas[kind].x + font->glyph_width)  * FONT_ATLAS_RATIO;
+    r32 v1 = (glyph->offset_in_atlas[kind].y + font->glyph_height) * FONT_ATLAS_RATIO;
+
+    add_text_vertex(ui, {{x0, y0}, {u0, v0}, fg, bg});
+    add_text_vertex(ui, {{x1, y0}, {u1, v0}, fg, bg});
+    add_text_vertex(ui, {{x0, y1}, {u0, v1}, fg, bg});
+
+    add_text_vertex(ui, {{x0, y1}, {u0, v1}, fg, bg});
+    add_text_vertex(ui, {{x1, y0}, {u1, v0}, fg, bg});
+    add_text_vertex(ui, {{x1, y1}, {u1, v1}, fg, bg});
 }
 
 INTERNAL void append_code_point(DArray<u8> *cmd, u32 cp) {
@@ -458,7 +482,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     }
 
     UIRect region = next_widget_region(ui->current_window, ui->draw_region);
-    V2i tile_count = {(s32)(region.w / ui->font->tile_width), (s32)(region.h / ui->font->tile_height)};
+    V2i tile_count = {(s32)(region.w / buffer->font->glyph_width), (s32)(region.h / buffer->font->glyph_height)};
     if (tile_count.x != buffer->tile_count.x || tile_count.y != buffer->tile_count.y) {
         buffer->tile_count = tile_count;
 
@@ -473,7 +497,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
 
     new_task(ui, UI_TASK_TEXT, ui->font_texture);
 
-    V2 padding = {region.w - (ui->font->tile_width * tile_count.x), region.h - (ui->font->tile_height * tile_count.y)};
+    V2 padding = {region.w - (buffer->font->glyph_width * tile_count.x), region.h - (buffer->font->glyph_height * tile_count.y)};
 
     V2 offset = {
         floorf(region.x + (padding.x * 0.5f)),
@@ -488,7 +512,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
 
     String content = {
         (u8*)buffer->ring.memory + buffer->display_start,
-        buffer->ring.pos - buffer->display_start
+        pos - buffer->display_start
     };
 
     tile_count.y -= 1;
@@ -496,7 +520,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     V2i current_tile = {};
     FOR (buffer->display_buffer, tile) {
         if (tile->cp != 0) {
-            draw_character(ui, offset, current_tile, tile->cp, tile->fg, tile->bg);
+            draw_character(ui, buffer->font, offset, current_tile, tile->cp, tile->style, tile->fg, tile->bg);
         }
 
         current_tile.x += 1;
@@ -617,7 +641,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     }
 
     for (s64 i = 0; i < buffer->prompt.buffer_used; i += 1) {
-        draw_character(ui, offset, current_tile, buffer->prompt.buffer[i], fg, bg);
+        draw_character(ui, buffer->font, offset, current_tile, buffer->prompt.buffer[i], CONSOLE_FONT_REGULAR, fg, bg);
         current_tile.x += 1;
     }
 
@@ -625,15 +649,15 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     // TODO: Skip beginning if too long or add command lines at the bottom
     for (;index < buffer->command.size; index += 1) {
         if (index == buffer->cursor_pos) {
-            draw_character(ui, offset, current_tile, buffer->command[index], invert_rgb(fg), invert_rgb(bg));
+            draw_character(ui, buffer->font, offset, current_tile, buffer->command[index], CONSOLE_FONT_REGULAR, invert_rgb(fg), invert_rgb(bg));
         } else {
-            draw_character(ui, offset, current_tile, buffer->command[index], fg, bg);
+            draw_character(ui, buffer->font, offset, current_tile, buffer->command[index], CONSOLE_FONT_REGULAR, fg, bg);
         }
 
         current_tile.x += 1;
     }
     if (index == buffer->cursor_pos) {
-        draw_character(ui, offset, current_tile, ' ', invert_rgb(fg), invert_rgb(bg));
+        draw_character(ui, buffer->font, offset, current_tile, ' ', CONSOLE_FONT_REGULAR, invert_rgb(fg), invert_rgb(bg));
     }
 
     return fire_command;

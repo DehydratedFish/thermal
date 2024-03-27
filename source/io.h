@@ -1,6 +1,7 @@
 #pragma once
 
 #include "definitions.h"
+#include "memory.h"
 
 
 enum {
@@ -31,7 +32,7 @@ enum {
     READ_ENTIRE_FILE_NOT_FOUND,
     READ_ENTIRE_FILE_READ_ERROR,
 };
-String read_entire_file(String file, u32 *status = 0);
+String read_entire_file(String file, u32 *status = 0, Allocator alloc = default_allocator());
 
 
 struct Path {

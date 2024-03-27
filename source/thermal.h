@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "string2.h"
 #include "io.h"
+#include "font.h"
 
 
 enum Key {
@@ -51,6 +52,8 @@ struct ApplicationState {
 
     Path current_dir;
 
+    String data_dir;
+
     b32 running;
 };
 
@@ -69,9 +72,15 @@ struct PromptBuffer {
     String format;
 };
 
+enum {
+    CONSOLE_TILE_FLAG_BOLD   = 0x01,
+    CONSOLE_TILE_FLAG_ITALIC = 0x02,
+
+    CONSOLE_TILE_FLAGS_BOLD_ITALIC = CONSOLE_TILE_FLAG_BOLD | CONSOLE_TILE_FLAG_ITALIC,
+};
 struct ConsoleTile {
     u32 cp;
-    u32 flags;
+    u32 style;
     u32 fg;
     u32 bg;
 };
@@ -97,9 +106,12 @@ struct ConsoleBuffer {
 
     Array<ConsoleTile> conversion_buffer;
 
+    ConsoleFont *font;
+
     u32 fg_color;
     u32 bg_color;
 
+    u32 current_tile_flags;
     u32 current_fg;
     u32 current_bg;
 
