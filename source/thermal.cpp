@@ -6,93 +6,35 @@
 #include "font.h"
 #include "renderer.h"
 #include "ui.h"
+
+#include "ansi_escape_parser.h"
     
 
-
-INTERNAL s32 escape_number(String *str) {
-    String num = {};
-    num.data = str->data;
-
-    for (s64 i = 0; i < str->size; i += 1) {
-        if (str->data[i] >= '0' && str->data[i] <= '9') {
-            num.size += 1;
-        } else {
-            break;
-        }
-    }
-
-    *str = shrink_front(*str, num.size);
-    s64 result = convert_string_to_s64(num.data, num.size);
-
-    return result;
-}
-
-enum {
-    ESC_SEQUENCE_NONE,
-
-    ESC_SEQUENCE_GRAPHICS,
-
-    ESC_SEQUENCE_ERASE,
-};
-struct EscapeSequence {
-    u32 kind;
-    s32 args[16];
-    s32 arg_count;
-    s32 length;
-};
-
-INTERNAL EscapeSequence parse_escape_sequence(String str) {
-    EscapeSequence seq = {};
-
-    if (str.size < 2) {
-        return seq;
-    }
-
-    if (str.data[0] != 0x1B) return seq;
-    if (str.data[1] != '[')  return seq;
-
-    String start = str;
-
-    str = shrink_front(str, 2);
-
-    if (str.size && str[0] == 'K') {
-        seq.kind   = ESC_SEQUENCE_ERASE;
-        seq.length = 3;
-
-        return seq;
-    }
-
-    seq.args[0] = escape_number(&str);
-    seq.kind = ESC_SEQUENCE_GRAPHICS;
-
-    s32 counter = 1;
-    while (str.size && str.data[0] == ';') {
-        str = shrink_front(str);
-
-        s32 value = escape_number(&str);
-        if (counter < 16) {
-            seq.args[counter] = value;
-        }
-
-        counter += 1;
-    }
-    seq.arg_count = counter;
-
-    if (str.size && str.data[0] != 'm') return {};
-
-    seq.length = (str.data + 1) - start.data;
-
-    return seq;
-}
 
 s32 const DefaultConsoleBufferSize = KILOBYTES(4);
 
 
+V2i local_cursor_pos(ConsoleBuffer *buffer) {
+    V2i result = {};
+    if (buffer->lines.size > buffer->tile_count.y) {
+        result.y = (buffer->scrollback_cursor.y + buffer->tile_count.y + buffer->scroll_offset) - buffer->lines.size;
+    } else {
+        result.y = buffer->scrollback_cursor.y;
+    }
+
+    result.x = buffer->scrollback_cursor.x; // TODO: - horizontal scroll_offset;
+
+    return result;
+}
+
 INTERNAL Array<ConsoleTile> console_buffer_content(ConsoleBuffer *buffer) {
-    u8 *ptr = (u8*)buffer->ring.memory + buffer->ring.alloc + buffer->ring.pos;
+    u8 *end = (u8*)buffer->ring.memory + buffer->ring.end;
+    u8 *ptr = end - buffer->ring.size;
+
+    if (ptr < buffer->ring.memory) ptr += buffer->ring.alloc;
 
     Array<ConsoleTile> result = {};
-    result.memory = (ConsoleTile*)(ptr - buffer->ring.size);
+    result.memory = (ConsoleTile*)(ptr);
     result.size   = buffer->ring.size / sizeof(ConsoleTile);
 
     return result;
@@ -119,17 +61,38 @@ INTERNAL b32 eat_new_line(Array<ConsoleTile> content, s64 *index) {
     return result;
 }
 
+INTERNAL u8 *end_ptr(ConsoleBuffer *buffer) {
+    return (u8*)buffer->ring.memory + buffer->ring.end;
+}
+
+INTERNAL s32 offset_from_pointer(ConsoleBuffer *buffer, void *ptr) {
+    u8 *p = (u8*)ptr;
+
+    u8 *end = (u8*)buffer->ring.memory + buffer->ring.end;
+    if (end < p) {
+        end += buffer->ring.alloc;
+    }
+
+    assert(p <= end);
+    return end - p;
+}
+
 void update_lines(ConsoleBuffer *buffer) {
     buffer->lines.size = 0;
 
     Array<ConsoleTile> content = console_buffer_content(buffer);
-    if (content.size == 0) return;
 
     LineInfo info = {content.memory, 0};
 
     LineInfo *current_line = append(buffer->lines, info);
 
+    ConsoleTile *cursor_ptr = (ConsoleTile*)(end_ptr(buffer) - buffer->write_offset);
     for (s64 i = 0; i < content.size; i += 1) {
+        if (content.memory + i == cursor_ptr) {
+            buffer->scrollback_cursor.x = current_line->line.size;
+            buffer->scrollback_cursor.y = buffer->lines.size - 1;
+        }
+
         if (eat_new_line(content, &i) ) {
             info.line.memory = content.memory + i;
             info.line.size = 0;
@@ -140,9 +103,15 @@ void update_lines(ConsoleBuffer *buffer) {
             info.line.memory = content.memory + i;
             info.line.size = 1;
             current_line = append(buffer->lines, info);
+
         } else {
             current_line->line.size += 1;
         }
+    }
+
+    if (content.memory + content.size == cursor_ptr) {
+        buffer->scrollback_cursor.x = current_line->line.size;
+        buffer->scrollback_cursor.y = buffer->lines.size - 1;
     }
 }
 
@@ -185,14 +154,184 @@ void update_display_buffer(ConsoleBuffer *buffer) {
     }
 }
 
+INTERNAL Array<ConsoleTile> current_line(ConsoleBuffer *buffer) {
+    return buffer->lines[buffer->scrollback_cursor.y].line;
+}
 
 INTERNAL void flush_conversion_buffer(ConsoleBuffer *buffer, s32 count) {
-    s64 size = count * sizeof(*buffer->conversion_buffer.memory);
-    s32 written = platform_write(&buffer->ring, buffer->conversion_buffer.memory, size);
-    assert(written == size);
+    u8 *ptr  = (u8*)buffer->conversion_buffer.memory;
+    s64 size = count * sizeof(ConsoleTile);
+
+    auto *write_func = platform_writable_range;
+
+    if (buffer->write_offset) {
+        s32 override_range = current_line(buffer).size - buffer->scrollback_cursor.x;
+        if (override_range) {
+            if (override_range > size) override_range = size;
+
+            String range = platform_writable_range(&buffer->ring, size, buffer->write_offset);
+            copy_memory(range.data, ptr, range.size);
+
+            size -= range.size;
+            ptr  += range.size;
+
+            buffer->write_offset = offset_from_pointer(buffer, range.data + range.size);
+
+            if (size == 0) return;
+        }
+
+        write_func = platform_writable_range_inserted;
+    }
+
+    String range = write_func(&buffer->ring, size, buffer->write_offset);
+
+    while (size) {
+        assert(size % sizeof(ConsoleTile) == 0);
+
+        copy_memory(range.data, ptr, range.size);
+        buffer->write_offset = offset_from_pointer(buffer, range.data + range.size);
+
+        ptr  += range.size;
+        size -= range.size;
+
+        range = write_func(&buffer->ring, size, buffer->write_offset);
+    }
 }
 
 u32 const DefaultTileFlags = 0;
+
+INTERNAL void change_buffer_graphics(ConsoleBuffer *buffer, EscapeSequence seq) {
+    for (s32 i = 0; i < seq.arg_count; i += 1) {
+        switch (seq.args[i]) {
+        case ESCAPE_CSI_RESET: {
+           buffer->current_fg = buffer->fg_color;
+           buffer->current_bg = buffer->bg_color;
+           buffer->current_tile_flags = DefaultTileFlags;
+        } break;
+
+        case ESCAPE_CSI_SET_BOLD: buffer->current_tile_flags |= CONSOLE_TILE_FLAG_BOLD; break;
+
+        case ESCAPE_CSI_FOREGROUND: {
+            assert(i + 1 < seq.arg_count);
+
+            if (seq.args[i + 1] == 5) {
+                assert(i + 2 < seq.arg_count);
+                assert(seq.args[i + 2] < 256);
+
+                buffer->current_fg = ansi_8bit_color(seq.args[i + 2]);
+
+                i += 1;
+            } else if (seq.args[i + 1] == 2) {
+                assert(i + 4 < seq.arg_count);
+
+                s32 r = seq.args[i + 2];
+                s32 g = seq.args[i + 3];
+                s32 b = seq.args[i + 4];
+                assert(r < 256);
+                assert(g < 256);
+                assert(b < 256);
+
+                buffer->current_fg = PACK_RGB(r, g, b);
+
+                i += 3;
+            } else {
+                LOG(LOG_ERROR, "Unsupported foreground color sequence.");
+            }
+        } break;
+
+        case ESCAPE_CSI_BACKGROUND: {
+        } break;
+
+        case ESCAPE_CSI_FOREGROUND_BLACK:
+        case ESCAPE_CSI_FOREGROUND_RED:
+        case ESCAPE_CSI_FOREGROUND_GREEN:
+        case ESCAPE_CSI_FOREGROUND_YELLOW:
+        case ESCAPE_CSI_FOREGROUND_BLUE:
+        case ESCAPE_CSI_FOREGROUND_MAGENTA:
+        case ESCAPE_CSI_FOREGROUND_CYAN:
+        case ESCAPE_CSI_FOREGROUND_WHITE:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_BLACK:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_RED:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_GREEN:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_YELLOW:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_BLUE:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_MAGENTA:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_CYAN:
+        case ESCAPE_CSI_FOREGROUND_BRIGHT_WHITE:
+            buffer->current_fg = ansi_4bit_color(seq.args[i]);
+        break;
+
+        case ESCAPE_CSI_BACKGROUND_BLACK:
+        case ESCAPE_CSI_BACKGROUND_RED:
+        case ESCAPE_CSI_BACKGROUND_GREEN:
+        case ESCAPE_CSI_BACKGROUND_YELLOW:
+        case ESCAPE_CSI_BACKGROUND_BLUE:
+        case ESCAPE_CSI_BACKGROUND_MAGENTA:
+        case ESCAPE_CSI_BACKGROUND_CYAN:
+        case ESCAPE_CSI_BACKGROUND_WHITE:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_BLACK:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_RED:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_GREEN:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_YELLOW:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_BLUE:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_MAGENTA:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_CYAN:
+        case ESCAPE_CSI_BACKGROUND_BRIGHT_WHITE:
+            buffer->current_bg = ansi_4bit_color(seq.args[i]);
+        break;
+        }
+    }
+}
+
+enum CursorMovement {
+    MOVE_UP,
+    MOVE_DOWN,
+    MOVE_LEFT,
+    MOVE_RIGHT,
+};
+INTERNAL void move_scrollback_cursor(ConsoleBuffer *buffer, CursorMovement direction, s32 amount) {
+    V2i local_cursor = local_cursor_pos(buffer);
+
+    if (direction == MOVE_UP) {
+        if (local_cursor.y - amount < 0) amount = local_cursor.y;
+        buffer->scrollback_cursor.y -= amount;
+    } else if (direction == MOVE_DOWN) {
+        if (local_cursor.y + amount > buffer->tile_count.y) amount = buffer->tile_count.y - local_cursor.y;
+        buffer->scrollback_cursor.y += amount;
+    } else if (direction == MOVE_LEFT) {
+        if (local_cursor.x - amount < 0) amount = local_cursor.x;
+        buffer->scrollback_cursor.x -= amount;
+    } else if (direction == MOVE_RIGHT) {
+        if (local_cursor.x + amount > buffer->tile_count.x) amount = buffer->tile_count.x - local_cursor.x;
+        buffer->scrollback_cursor.x += amount;
+    }
+
+    if (buffer->line_wrap && buffer->scrollback_cursor.x > buffer->tile_count.x) {
+        buffer->scrollback_cursor.x = buffer->tile_count.x;
+    }
+
+    LineInfo *line = &buffer->lines[buffer->scrollback_cursor.y];
+    if (line->line.size < buffer->scrollback_cursor.x) {
+        ConsoleTile space = {};
+        space.cp = ' ';
+
+        LineInfo *info = &buffer->lines[buffer->scrollback_cursor.y];
+        s32 write_offset = offset_from_pointer(buffer, info->line.memory + info->line.size);
+
+        // TODO: Only add spaces if there will actually be an insertion?
+        s32 additional_tiles = (buffer->scrollback_cursor.x - line->line.size);
+        String range = platform_writable_range_inserted(&buffer->ring, additional_tiles * sizeof(ConsoleTile), write_offset);
+
+        ConsoleTile *mem = (ConsoleTile*)range.data;
+        for (s32 i = 0; i < additional_tiles; i += 1) {
+            mem[i] = space;
+        }
+
+        info->line.size += additional_tiles;
+    }
+
+    buffer->write_offset = offset_from_pointer(buffer, buffer->lines[buffer->scrollback_cursor.y].line.memory + buffer->scrollback_cursor.x);
+}
 
 INTERNAL void append(ConsoleBuffer *buffer, String str) {
     s32 conversion_count = 0;
@@ -201,32 +340,33 @@ INTERNAL void append(ConsoleBuffer *buffer, String str) {
 
     while (str.size) {
         EscapeSequence seq = parse_escape_sequence(str);
-        if (seq.kind != 0) {
+        if (seq.valid) {
             flush_conversion_buffer(buffer, conversion_count);
+            update_lines(buffer);
 
-            str = shrink_front(str, seq.length);
+            str = shrink_front(str, seq.length_in_bytes);
             conversion_count = 0;
 
-            if (seq.kind == ESC_SEQUENCE_GRAPHICS) {
-                for (s32 i = 0; i < seq.arg_count; i += 1) {
-                    if (seq.args[i] == 38 && seq.args[i + 1] == 2) {
-                        buffer->current_fg = PACK_RGB(seq.args[i + 2], seq.args[i + 3], seq.args[i + 4]);
-                        i += 4;
-                    } else if (seq.args[i] == 48 && seq.args[i + 1] == 2) {
-                        buffer->current_bg = PACK_RGB(seq.args[i + 2], seq.args[i + 3], seq.args[i + 4]);
-                        i += 4;
-                    } else if (seq.args[i] == 1) {
-                        buffer->current_tile_flags |= CONSOLE_TILE_FLAG_BOLD;
-                    } else if (seq.args[i] == 31) {
-                        buffer->current_fg = PACK_RGB(255, 0, 0);
-                    } else if (seq.args[i] == 0) {
-                        buffer->current_fg = buffer->fg_color;
-                        buffer->current_bg = buffer->bg_color;
-                        buffer->current_tile_flags = DefaultTileFlags;
-                    }
-                }
-            } else if (seq.kind == ESC_SEQUENCE_ERASE) {
+            if (seq.kind == 'm') {
+                change_buffer_graphics(buffer, seq);
+            } else if (seq.kind == 'K') {
                 // TODO: erase to end of line, start of line and whole line
+            } else if (seq.kind == 'A') {
+                if (seq.args[0] == 0) seq.args[0] = 1;
+
+                move_scrollback_cursor(buffer, MOVE_UP, seq.args[0]);
+            } else if (seq.kind == 'B') {
+                if (seq.args[0] == 0) seq.args[0] = 1;
+
+                move_scrollback_cursor(buffer, MOVE_DOWN, seq.args[0]);
+            } else if (seq.kind == 'C') {
+                if (seq.args[0] == 0) seq.args[0] = 1;
+
+                move_scrollback_cursor(buffer, MOVE_RIGHT, seq.args[0]);
+            } else if (seq.kind == 'D') {
+                if (seq.args[0] == 0) seq.args[0] = 1;
+
+                move_scrollback_cursor(buffer, MOVE_LEFT, seq.args[0]);
             }
         } else {
             UTF8CharResult c = utf8_peek(str);
@@ -260,6 +400,13 @@ INTERNAL void append(ConsoleBuffer *buffer, String str) {
 
     update_lines(buffer);
     update_display_buffer(buffer);
+}
+
+INTERNAL void move_cursor_to_end(ConsoleBuffer *buffer) {
+    buffer->scrollback_cursor.y = buffer->lines.size - 1;
+    buffer->scrollback_cursor.x = buffer->lines[buffer->scrollback_cursor.y].line.size;
+
+    buffer->write_offset = 0;
 }
 
 INTERNAL void generate_prompt(PromptBuffer *prompt, ApplicationState *state) {
@@ -297,6 +444,33 @@ INTERNAL void backslash_to_slash(String str) {
         if (str[i] == '\\') str[i] = '/';
     }
 }
+INTERNAL String ANSIColorTest =
+"\x1b[38;2;255;0;255mThis is a test string that should look purple.\n"
+"\x1b[0m\x1b[1mAnd this text is bold.\n"
+
+"\x1b[0m"
+"\x1b[30mBlack\n"
+"\x1b[31mRed\n"
+"\x1b[32mGreen\n"
+"\x1b[33mYellow\n"
+"\x1b[34mBlue\n"
+"\x1b[35mMagenta\n"
+"\x1b[36mCyan\n"
+"\x1b[37mWhite\n"
+
+"\x1b[90mBlack\n"
+"\x1b[91mRed\n"
+"\x1b[92mGreen\n"
+"\x1b[93mYellow\n"
+"\x1b[94mBlue\n"
+"\x1b[95mMagenta\n"
+"\x1b[96mCyan\n"
+"\x1b[97mWhite\n"
+;
+
+INTERNAL String ANSICursorTest =
+"sjfghsgskfjghl\x1b[3A\x1b[5CHallo\nT"
+;
 
 
 s32 application_main(Array<String> args) {
@@ -374,6 +548,7 @@ s32 application_main(Array<String> args) {
             buffer.current_fg = buffer.fg_color;
             buffer.current_bg = buffer.bg_color;
             buffer.current_tile_flags = 0;
+            buffer.write_offset = 0;
 
             String32 utf32_command = {buffer.command.memory, buffer.command.size};
 
@@ -415,8 +590,10 @@ s32 application_main(Array<String> args) {
                     } else {
                         change_path(&state.current_dir, command);
                     }
-                } else if (command == "ansi_test") {
-                    append(&buffer, "\x1b[38;2;255;0;255mThis is a test string that should look purple. \x1b[0m\x1b[1mAnd this text is bold.\n");
+                } else if (command == "ansi_color") {
+                    append(&buffer, ANSIColorTest);
+                } else if (command == "ansi_cursor") {
+                    append(&buffer, ANSICursorTest);
                 } else {
                     buffer.pec = platform_execute(command);
 

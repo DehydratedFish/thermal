@@ -91,9 +91,12 @@ struct LineInfo {
 
 struct ConsoleBuffer {
     PlatformRingBuffer ring;
-    DArray<LineInfo> lines;
-    s32 scroll_offset;
+    s32 write_offset;
 
+    s32 scroll_offset;
+    V2i scrollback_cursor; // .x is the column and .y is the line.
+
+    DArray<LineInfo> lines;
     DArray<ConsoleTile> display_buffer;
 
     DArray<u32> command;
@@ -115,8 +118,6 @@ struct ConsoleBuffer {
     u32 current_fg;
     u32 current_bg;
 
-    s32 display_start;
-
     b32 line_wrap;
 
     V2i tile_count;
@@ -124,6 +125,8 @@ struct ConsoleBuffer {
     PlatformExecutionContext pec;
 };
 
+
+V2i local_cursor_pos(ConsoleBuffer *buffer);
 
 void update_lines(ConsoleBuffer *buffer);
 void update_display_buffer(ConsoleBuffer *buffer);

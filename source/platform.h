@@ -75,12 +75,23 @@ struct PlatformRingBuffer {
     void *memory;
     s32 size;
     s32 alloc;
-    s32 pos;
+    s32 end;
 };
 
+
 PlatformRingBuffer platform_create_ring_buffer(s32 size);
-// Returns the size of the actually written part. At maximum the last ring->alloc bytes of the buffer will be written.
-s32 platform_write(PlatformRingBuffer *ring, void *buffer, s32 size);
+
+// Returns the next writable area in the buffer and advances .end accordingly.
+// If the requested size is bigger than .alloc the returned range will be smaller than size
+// and the write needs to be split.
+//
+// If offset is specified then the write will begin before the end of the buffer,
+// overriding the contents.
+String platform_writable_range(PlatformRingBuffer *ring, s32 size, s32 offset = 0);
+
+// Same as above but the contents after the offset are preserved and moved backwards.
+// The oldest bytes will be overridden.
+String platform_writable_range_inserted(PlatformRingBuffer *ring, s32 size, s32 offset = 0);
 
 
 enum {

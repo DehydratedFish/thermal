@@ -295,7 +295,7 @@ int main_main() {
 
     CoInitialize(0);
 
-    // TODO: Remove on release build? But it is still needed for stack traces
+    // TODO: Remove on release build? It is needed for stack traces but eats > 20mb...
     if (!SymInitialize(ProcessHandle, 0, TRUE)) {
         die("Could not initialize DebugSymbols.");
     }
@@ -848,29 +848,111 @@ PlatformRingBuffer platform_create_ring_buffer(s32 size) {
     ring.memory = view1;
     ring.size   = 0;
     ring.alloc  = size;
-    ring.pos    = 0;
+    ring.end    = 0;
 
     return ring;
 }
 
-s32 platform_write(PlatformRingBuffer *ring, void *buffer, s32 size) {
-    if (size > ring->alloc) {
-        buffer = (u8*)buffer + (size - ring->alloc);
-        size = ring->alloc;
+
+String platform_writable_range(PlatformRingBuffer *ring, s32 size, s32 offset) {
+    if (size > ring->alloc) size = ring->alloc;
+    
+    u8 *mem = (u8*)ring->memory;
+
+    u8 *start;
+    if (offset) {
+        assert(offset <= ring->size);
+
+        start = mem + (ring->end - offset);
+        if (start < mem) start += ring->alloc;
+
+        s32 added_size = size - offset;
+        if (added_size > 0) {
+            ring->end  += added_size;
+            ring->size += added_size;
+        }
+    } else {
+        start = mem + ring->end;
+
+        ring->end  += size;
+        ring->size += size;
     }
 
-    copy_memory((u8*)ring->memory + ring->pos, buffer, size);
-    ring->pos  += size;
-    ring->size += size;
+    if (ring->end  > ring->alloc) ring->end -= ring->alloc;
+    if (ring->size > ring->alloc) ring->size = ring->alloc;
 
-    if (ring->pos  > ring->alloc) ring->pos  -= ring->alloc;
-    if (ring->size > ring->alloc) ring->size  = ring->alloc;
+    String range = {};
+    range.data = start;
+    range.size = size;
 
-    assert(ring->pos  <= ring->alloc);
-
-    return size;
+    return range;
 }
 
+String platform_writable_range_inserted(PlatformRingBuffer *ring, s32 size, s32 offset) {
+    if (!offset) return platform_writable_range(ring, size);
+
+    assert(offset <= ring->size);
+
+    s32 writable_size = ring->alloc - offset;
+    if (size > writable_size) size = writable_size;
+
+    u8 *mem = (u8*)ring->memory;
+
+    u8 *start = mem + (ring->end - offset);
+    if (start < mem) start += ring->alloc;
+
+    copy_memory(start + size, start, offset);
+
+    String range = {};
+    range.data = start;
+    range.size = size;
+
+    ring->end  += size;
+    ring->size += size;
+
+    if (ring->end  > ring->alloc) ring->end -= ring->alloc;
+    if (ring->size > ring->alloc) ring->size = ring->alloc;
+
+    return range;
+}
+
+/*
+String platform_writable_range(PlatformRingBuffer *ring, s32 size, void *at) {
+    String range = {};
+
+    if (at && at != (u8*)ring->memory + ring->end) {
+        s32 end = ring->end + ring->alloc;
+
+        // Make sure the specified pointer is inside both mapped pages and smaller than the writable area.
+        assert(at >= (u8*)ring->memory && at <= (u8*)ring->memory + end);
+
+        s32 at_index = ((u8*)at) - (u8*)ring->memory;
+        s32 space_after_at = end - at_index;
+
+        s32 max_size = ring->alloc - space_after_at;
+        if (size > max_size) size = max_size;
+
+        copy_memory((u8*)ring->memory + at_index + size, (u8*)ring->memory + at_index, size);
+
+        if (at_index > ring->alloc) at_index -= ring->alloc;
+        range.data = (u8*)ring->memory + at_index;
+        range.size = size;
+    } else {
+        if (size > ring->alloc) size = ring->alloc;
+
+        range.data = (u8*)ring->memory + ring->end;
+        range.size = size;
+    }
+
+    ring->end += size;
+    if (ring->end > ring->alloc) ring->end -= ring->alloc;
+
+    ring->size += size;
+    if (ring->size > ring->alloc) ring->size = ring->alloc;
+
+    return range;
+}
+*/
 
 
 INTERNAL void NullRenderFunc(GameState*) {};

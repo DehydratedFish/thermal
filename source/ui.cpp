@@ -507,18 +507,16 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     u32 fg = buffer->fg_color;
     u32 bg = 0;
 
-    s32 pos = buffer->ring.pos;
-    if (pos < buffer->display_start) pos += buffer->ring.alloc;
-
-    String content = {
-        (u8*)buffer->ring.memory + buffer->display_start,
-        pos - buffer->display_start
-    };
-
     tile_count.y -= 1;
+
+    V2i cursor_pos = local_cursor_pos(buffer);
 
     V2i current_tile = {};
     FOR (buffer->display_buffer, tile) {
+        if (current_tile.x == cursor_pos.x && current_tile.y == cursor_pos.y) {
+            draw_character(ui, buffer->font, offset, current_tile, ' ', tile->style, tile->fg, PACK_RGB(255, 0, 255));
+        }
+
         if (tile->cp != 0) {
             draw_character(ui, buffer->font, offset, current_tile, tile->cp, tile->style, tile->fg, tile->bg);
         }
@@ -649,7 +647,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
     // TODO: Skip beginning if too long or add command lines at the bottom
     for (;index < buffer->command.size; index += 1) {
         if (index == buffer->cursor_pos) {
-            draw_character(ui, buffer->font, offset, current_tile, buffer->command[index], CONSOLE_FONT_REGULAR, invert_rgb(fg), invert_rgb(bg));
+            draw_character(ui, buffer->font, offset, current_tile, buffer->command[index], CONSOLE_FONT_REGULAR, bg, fg);
         } else {
             draw_character(ui, buffer->font, offset, current_tile, buffer->command[index], CONSOLE_FONT_REGULAR, fg, bg);
         }
@@ -657,7 +655,7 @@ b32 console_buffer_view(UIState *ui, void *id, ConsoleBuffer *buffer) {
         current_tile.x += 1;
     }
     if (index == buffer->cursor_pos) {
-        draw_character(ui, buffer->font, offset, current_tile, ' ', CONSOLE_FONT_REGULAR, invert_rgb(fg), invert_rgb(bg));
+        draw_character(ui, buffer->font, offset, current_tile, ' ', CONSOLE_FONT_REGULAR, bg, fg);
     }
 
     return fire_command;

@@ -43,7 +43,7 @@ void fire_assert(char const *msg, char const *func, char const *file, int line);
 #define STRUCT_OFFSET(type, member) ((u64)&(((type*)0)->member))
 #define STRUCT_OFFSET_PTR(type, member) (&(((type*)0)->member))
 
-#define PACK_RGBA(r, g, b, a) ((r) | ((g) << 8) | ((b) << 16) | ((a) << 24))
+#define PACK_RGBA(r, g, b, a) (u32)((r) | ((g) << 8) | ((b) << 16) | ((a) << 24))
 #define PACK_RGB(r, g, b) PACK_RGBA(r, g, b, 255)
 
 
@@ -238,6 +238,7 @@ struct M3 {
 struct M4 {
     r32 value[16];
 };
+
 
 
 void die(String msg);
